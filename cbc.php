@@ -1,6 +1,8 @@
 <?php
 
 set_time_limit(20000);
+ echo 'eee';
+
  
 $mongoConn = "mongodb://csmcreport1:Arcu%24RPT%40cM%24c@10.12.0.23:45431/arcusairdb";
 $mongodbname = "arcusairdb";
