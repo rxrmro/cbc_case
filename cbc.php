@@ -1,114 +1,121 @@
 <?php
 
-set_time_limit(20000);
-echo 'Script started...';
+class DatabaseConnection {
+    protected string $serverName;
+    protected string $database;
+    protected string $user;
+    protected string $password;
+    protected $conn;
 
-// Securely fetch database credentials from environment variables
-$mongoConn = getenv('MONGO_CONN_STRING');
-$mongodbname = getenv('MONGO_DB_NAME');
-$serverName = getenv('SQL_SERVER_NAME');
-$sqlDatabase = getenv('SQL_DATABASE');
-$sqlUser = getenv('SQL_USER');
-$sqlPassword = getenv('SQL_PASSWORD');
-
-$data = [];
-try {
-    // MongoDB Connection
-    $mongo = new MongoDB\Driver\Manager($mongoConn);
-    echo "✅ Connected to MongoDB successfully!\n";
-
-    $pipeline = [
-        ['$limit' => 100],
-        [
-            '$lookup' => [
-                'from' => 'orderitems',
-                'localField' => 'orderitemuid',
-                'foreignField' => '_id',
-                'as' => 'orderitem'
-            ]
-        ],
-        ['$unwind' => '$orderitem'],
-        [
-            '$match' => [
-                'orderitem.name' => 'COMPLETE BLOOD COUNT'
-            ]
-        ],
-        ['$unwind' => '$resultvalues'],
-        [
-            '$lookup' => [
-                'from' => 'patientorders',
-                'localField' => 'patientorderuid',
-                'foreignField' => '_id',
-                'as' => 'orderDetails'
-            ]
-        ],
-        ['$unwind' => '$orderDetails'],
-        [
-            '$project' => [
-                'visitid' => '$orderDetails.visitid',
-                'patientmrn' => '$orderDetails.patientmrn',
-                'resultvaluesId' => '$resultvalues._id',
-                'resultName' => '$resultvalues.name',
-                'resultvalue' => '$resultvalues.resultvalue',
-                'normalRange' => '$resultvalues.normalrange',
-                'uomDescription' => '$resultvalues.uomdescription',
-                'HLN' => '$resultvalues.HLN',
-                'shorttext' => '$resultvalues.shorttext',
-                'ordernumber' => '$orderDetails.ordernumber',
-                'orderitemcode' => '$orderitem.code',
-                'orderdate' => [
-                    '$dateToString' => [
-                        'format' => '%Y-%m-%d %H:%M:%S',
-                        'timezone' => '+08:00',
-                        'date' => '$approvaldate'
-                    ]
-                ]
-            ]
-        ]
-    ];
-
-    $query = new MongoDB\Driver\Command([
-        'aggregate' => 'labresults',
-        'cursor' => new stdClass,
-        'allowDiskUse' => true,
-        'pipeline' => $pipeline
-    ]);
-
-    $rows = $mongo->executeCommand($mongodbname, $query);
-    foreach ($rows as $document) {
-        $data[] = (array) $document;
+    public function __construct(string $serverName, string $database, string $user, string $password) {
+        $this->serverName = $serverName;
+        $this->database = $database;
+        $this->user = $user;
+        $this->password = $password;
+        $this->connect();
     }
-} catch (Exception $e) {
-    echo "❌ MongoDB Error: " . $e->getMessage() . "\n";
+
+    private function connect(): void {
+        $this->conn = sqlsrv_connect($this->serverName, [
+            "Database" => $this->database,
+            "Uid" => $this->user,
+            "PWD" => $this->password
+        ]);
+
+        if (!$this->conn) {
+            die("❌ SQL Server Connection Failed: " . print_r(sqlsrv_errors(), true));
+        }
+    }
+
+    public function getConnection() {
+        return $this->conn;
+    }
+
+    public function closeConnection(): void {
+        sqlsrv_close($this->conn);
+    }
 }
 
-// SQL Server Connection
-$connectionOptions = [
-    "Database" => $sqlDatabase,
-    "Uid" => $sqlUser,
-    "PWD" => $sqlPassword
+class MongoDBHandler {
+    protected $manager;
+    protected string $database;
+
+    public function __construct(string $connectionString, string $database) {
+        $this->database = $database;
+        $this->manager = new MongoDB\Driver\Manager($connectionString);
+    }
+
+    public function fetchData(array $pipeline): array {
+        $query = new MongoDB\Driver\Command([
+            'aggregate' => 'labresults',
+            'cursor' => new stdClass(),
+            'allowDiskUse' => true,
+            'pipeline' => $pipeline
+        ]);
+        
+        try {
+            $rows = $this->manager->executeCommand($this->database, $query);
+            return iterator_to_array($rows);
+        } catch (MongoDB\Driver\Exception\Exception $e) {
+            echo "❌ MongoDB Query Error: " . $e->getMessage() . "\n";
+            return [];
+        }
+    }
+}
+
+class DataProcessor {
+    private array $data;
+
+    public function __construct(array $data) {
+        $this->data = $data;
+    }
+
+    public function process(): array {
+        return array_map(fn($document) => (array) $document, $this->data);
+    }
+}
+
+class SQLDataInserter {
+    private $conn;
+
+    public function __construct($conn) {
+        $this->conn = $conn;
+    }
+
+    public function insertData(array $data): void {
+        $sql = "INSERT INTO labresults_items_list (PatientMRN, visitid, ResultName, ResultValuesId, resultvalue, NormalRange, UOMDescription, HLN, ShortText, OrderNumber, OrderItemCode, OrderDate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        
+        foreach ($data as $d) {
+            $params = array_values($d);
+            $stmt = sqlsrv_query($this->conn, $sql, $params);
+            
+            if (!$stmt) {
+                echo "❌ SQL Insert Failed: " . print_r(sqlsrv_errors(), true) . "\n";
+            }
+        }
+    }
+}
+
+// Initialize objects dynamically
+$mongo = new MongoDBHandler(getenv('MONGO_CONN_STRING'), getenv('MONGO_DB_NAME'));
+$sqlDb = new DatabaseConnection(getenv('SQL_SERVER_NAME'), getenv('SQL_DATABASE'), getenv('SQL_USER'), getenv('SQL_PASSWORD'));
+
+$pipeline = [
+    ['$limit' => 100],
+    ['$lookup' => ['from' => 'orderitems', 'localField' => 'orderitemuid', 'foreignField' => '_id', 'as' => 'orderitem']],
+    ['$unwind' => '$orderitem'],
+    ['$match' => ['orderitem.name' => 'COMPLETE BLOOD COUNT']],
+    ['$unwind' => '$resultvalues'],
+    ['$project' => ['patientmrn' => '$PatientMRN.mrn', 'visitid' => '$visitidDetails.visitid', 'resultvalue' => '$resultvalues.resultvalue']]
 ];
-$conn = sqlsrv_connect($serverName, $connectionOptions);
 
-if (!$conn) {
-    die("❌ SQL Server Connection Failed: " . print_r(sqlsrv_errors(), true));
-}
+$mongoData = $mongo->fetchData($pipeline);
+$processedData = (new DataProcessor($mongoData))->process();
+$inserter = new SQLDataInserter($sqlDb->getConnection());
+$inserter->insertData($processedData);
 
-echo "✅ Connected to SQL Server successfully!\n";
+$sqlDb->closeConnection();
 
-// Insert MongoDB data into SQL Server
-foreach ($data as $d) {
-    $sql = "INSERT INTO labresults_items_list (
-        PatientMRN, visitid, ResultName, ResultValuesId, resultvalue, NormalRange, UOMDescription, 
-        HLN, ShortText, OrderNumber, OrderItemCode, OrderDate
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-    $params = array_values($d);
-    $stmt = sqlsrv_query($conn, $sql, $params);
-    if (!$stmt) {
-        echo "❌ Insert Failed: " . print_r(sqlsrv_errors(), true);
-    }
-}
+echo "✅ Data processing completed successfully!";
 
-echo "Data inserted successfully!\n";
-sqlsrv_close($conn);
 ?>
